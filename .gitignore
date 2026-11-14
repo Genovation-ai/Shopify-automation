@@ -1,0 +1,29 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Runtime logs & run folders
+logs/
+*.log
+agent_runs/
+catalogue_runs/
+bestbuy_runs/
+price_update_log.jsonl
+
+# Scratch / intermediate CSVs & debug artifacts
+*.csv
+*.png
+terminal_output*.txt
+batch_update_2.py
+bestbuy
+bestbuy_*.json
+bestbuy_bookmarks.html
+catalogue_checkpoint.json
+project_bundle.txt
