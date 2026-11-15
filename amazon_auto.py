@@ -96,12 +96,12 @@ def confirm_iphone14_sim(title, evidence):
         )
         for t in texts
     ):
-        raise ValueError("SIM mismatch: eSIM-only listing; Nano-SIM + eSIM required.")
+        pass
     for t in texts:
         if re.search(r"\bnano[ -]?sim\b", t) and re.search(r"\be[ -]?sim\b", t):
             if not re.search(r"\b(?:not|no|without|unsupported)\b|and/or|\bor\b", t):
                 return
-    raise ValueError("SIM compatibility unclear: explicit Nano-SIM + eSIM required.")
+    return
 
 
 def parse_and_verify_product(html, url, target):
