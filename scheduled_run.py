@@ -1,4 +1,4 @@
-"""Non-interactive twice-daily orchestrator for Amazon.ca + BestBuy.ca + Very Good midpoint -> Shopify."""
+﻿"""Non-interactive twice-daily orchestrator for Amazon.ca + BestBuy.ca + Very Good midpoint -> Shopify."""
 import argparse
 import subprocess
 import sys
@@ -18,6 +18,11 @@ from bestbuy_auto import process_targets as run_bestbuy
 from batch_proposals import FIELDS as PROPOSAL_FIELDS, read_variant, validate_identity
 
 folder = Path(__file__).resolve().parent
+STEP_FACTOR = Decimal("0.95")  # 5% step-down per condition grade when capped
+
+
+def q2(val: Decimal) -> Decimal:
+    return val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def refresh_catalogue():
@@ -27,8 +32,72 @@ def refresh_catalogue():
             raise RuntimeError(f"{script} failed with exit code {res.returncode}")
 
 
+def cap_proposals_below_upper_grades(proposals, condition, grade_prices):
+    """Ensure Good and Fair never exceed higher condition grades (5% step-down per tier)."""
+    modified = False
+    for p in proposals:
+        key = (p["model"], p["storage"], p["color"])
+        proposed = Decimal(p["proposed_price_cad"])
+        current = Decimal(p["current_shopify_price_cad"])
+        exc_info = grade_prices.get((key[0], key[1], key[2], "Excellent"))
+        vg_info = grade_prices.get((key[0], key[1], key[2], "Very Good"))
+        good_info = grade_prices.get((key[0], key[1], key[2], "Good"))
+
+        cap_price = None
+        cap_note = ""
+
+        if condition == "Good" and exc_info:
+            exc_price = Decimal(exc_info["price"])
+            vg_target = q2(exc_price * STEP_FACTOR)
+            max_good = q2(vg_target * STEP_FACTOR)
+            if proposed >= exc_price or proposed > max_good:
+                cap_price = max_good
+                cap_note = f"Capped -5% below Very Good (Exc=${exc_price:.2f})"
+        elif condition == "Fair":
+            if good_info:
+                good_price = Decimal(good_info["price"])
+                max_fair = q2(good_price * STEP_FACTOR)
+                if proposed >= good_price:
+                    cap_price = max_fair
+                    cap_note = f"Capped -5% below Good (${good_price:.2f})"
+            elif vg_info:
+                vg_price = Decimal(vg_info["price"])
+                max_fair = q2(q2(vg_price * STEP_FACTOR) * STEP_FACTOR)
+                if proposed >= vg_price:
+                    cap_price = max_fair
+                    cap_note = f"Capped below Very Good (${vg_price:.2f})"
+            elif exc_info:
+                exc_price = Decimal(exc_info["price"])
+                max_fair = q2(q2(q2(exc_price * STEP_FACTOR) * STEP_FACTOR) * STEP_FACTOR)
+                if proposed >= exc_price:
+                    cap_price = max_fair
+                    cap_note = f"Capped below Excellent (${exc_price:.2f})"
+
+        if cap_price is not None and cap_price != proposed:
+            change = cap_price - current
+            action = "INCREASE" if change > 0 else "DECREASE" if change < 0 else "NO CHANGE"
+            print(
+                f"[{condition.upper()} CAP] {p['model']} {p['storage']} {p['color']}: "
+                f"Competitor proposal ${proposed:.2f} -> capped at ${cap_price:.2f} CAD ({cap_note})",
+                flush=True,
+            )
+            p["proposed_price_cad"] = f"{cap_price:.2f}"
+            p["competitor_price_cad"] = f"{cap_price:.2f}"
+            p["discount_cad"] = "0.00"
+            p["change_cad"] = f"{change:.2f}"
+            p["action"] = action
+            p["seller"] = f"{p['seller']} ({cap_note})"
+            p["pricing_basis"] = "ESTIMATED_GRADE_PRICE"
+            p["source_color"] = p["color"]
+            p["source_variant_id"] = p["variant_id"]
+            p["capped"] = "1"
+            modified = True
+
+    return modified
+
+
 def build_very_good_proposals(vg_targets, grade_prices):
-    """Compute Very Good = (Good + Excellent) / 2 for exact (model, storage, color) matches."""
+    """Compute Very Good = (Good + Excellent) / 2, or 5% below Excellent when Good was inverted/capped."""
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     proposals = []
     report = []
@@ -56,25 +125,23 @@ def build_very_good_proposals(vg_targets, grade_prices):
 
         good_price = Decimal(good_info["price"])
         exc_price = Decimal(exc_info["price"])
-        if good_price > exc_price:
-            reason = f"HOLD: Good (${good_price:.2f}) exceeds Excellent (${exc_price:.2f})."
-            print(f"[VERY GOOD HOLD] {t['product_title']} {t['storage']} {t['color']}: {reason}", flush=True)
-            report.append(dict(
-                model=t["product_title"], storage=t["storage"], color=t["color"],
-                condition="Very Good", variant_id=t["variant_id"], status="HOLD",
-                reason=reason, candidate_count=0, verified_count=0,
-                proposed_price_cad="", pricing_basis="", source_color="", source_variant_id="",
-            ))
-            continue
+        vg_cap = q2(exc_price * STEP_FACTOR)
 
-        est_price = ((good_price + exc_price) / Decimal("2")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if good_info.get("capped") or good_price >= exc_price:
+            est_price = vg_cap
+            basis_note = f"5% below Excellent (${exc_price:.2f}); Good capped at ${good_price:.2f}"
+        else:
+            est_price = q2((good_price + exc_price) / Decimal("2"))
+            if est_price >= exc_price:
+                est_price = vg_cap
+            basis_note = f"Good=${good_price:.2f}; Excellent=${exc_price:.2f}"
+
         variant = read_variant(t["variant_id"])
         validate_identity(variant, t["variant_id"], t["product_title"], t["storage"], t["color"], "Very Good")
         current = Decimal(variant["price"])
         change = est_price - current
         action = "INCREASE" if change > 0 else "DECREASE" if change < 0 else "NO CHANGE"
 
-        basis_note = f"Good=${good_price:.2f}; Excellent=${exc_price:.2f}"
         proposals.append(dict(
             prepared_at=now,
             offer_checked_at=now,
@@ -137,8 +204,8 @@ def main():
         approve_targets(folder, targets)
         print(f"Approved {len(targets)} variants in approved_targets.json.", flush=True)
 
-    # Group by (model, storage, condition), processing Excellent, Good, Fair before Very Good
-    grade_order = {"Excellent": 0, "Good": 1, "Fair": 2, "Very Good": 3}
+    # Process in strict hierarchy order: Excellent -> Good -> Very Good -> Fair
+    grade_order = {"Excellent": 0, "Good": 1, "Very Good": 2, "Fair": 3}
     groups = {}
     for t in targets:
         key = (t["product_title"], t["storage"], t["condition"])
@@ -147,7 +214,7 @@ def main():
     sorted_groups = sorted(groups.items(), key=lambda item: (item[0][0], item[0][1], grade_order.get(item[0][2], 9)))
 
     all_report_rows = []
-    grade_prices = {}  # (model, storage, color, condition) -> {"price": str, "url": str, "variant_id": str}
+    grade_prices = {}  # (model, storage, color, condition) -> {"price": str, "url": str, "variant_id": str, "capped": bool}
     print(f"=== 2. Processing {len(targets)} variants across {len(sorted_groups)} groups ===", flush=True)
 
     for idx, ((model, storage, condition), group_targets) in enumerate(sorted_groups, 1):
@@ -168,6 +235,13 @@ def main():
                         r["status"] = updates[r["variant_id"]]["status"]
                         if updates[r["variant_id"]]["reason"]:
                             r["reason"] += f" | {updates[r['variant_id']]['reason']}"
+            for p in vg_proposals:
+                grade_prices[(p["model"], p["storage"], p["color"], "Very Good")] = {
+                    "price": p["proposed_price_cad"],
+                    "url": p["source_url"],
+                    "variant_id": p["variant_id"],
+                    "capped": False,
+                }
             all_report_rows.extend(vg_report)
             write_rows(folder / "catalogue_report.csv", all_report_rows, REPORT_FIELDS)
             continue
@@ -185,17 +259,24 @@ def main():
         if any(o["status"] == "VERIFIED" for o in offers):
             prop_res = subprocess.run([sys.executable, "-u", str(folder / "batch_proposals.py")], cwd=folder)
             if prop_res.returncode == 0:
-                cmd = [sys.executable, "-u", str(folder / "batch_update.py")]
+                proposals = read_rows(folder / "batch_price_proposals.csv")
+                was_capped = cap_proposals_below_upper_grades(proposals, condition, grade_prices)
+                if was_capped:
+                    clean_proposals = [{k: p[k] for k in PROPOSAL_FIELDS} for p in proposals]
+                    write_rows(folder / "batch_price_proposals.csv", clean_proposals, PROPOSAL_FIELDS)
+                cmd = [sys.executable, "-u", str(folder / "batch_update.py"), "--use-existing-proposals"]
                 if args.apply:
                     cmd.append("--apply")
                 subprocess.run(cmd, cwd=folder)
+        else:
+            proposals = []
 
-        proposals = read_rows(folder / "batch_price_proposals.csv")
         for p in proposals:
             grade_prices[(p["model"], p["storage"], p["color"], p["condition"])] = {
                 "price": p["proposed_price_cad"],
                 "url": p["source_url"],
                 "variant_id": p["variant_id"],
+                "capped": p.get("capped") == "1",
             }
 
         updates = read_rows(folder / "batch_update_results.csv")
