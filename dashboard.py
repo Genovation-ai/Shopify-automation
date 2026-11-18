@@ -38,13 +38,6 @@ st.markdown("""
         border-radius: 10px;
         box-shadow: 0 2px 6px rgba(0,0,0,0.12);
     }
-    .workflow-banner {
-        background-color: #1e293b;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 14px 20px;
-        margin-bottom: 18px;
-    }
     .admin-badge {
         position: relative !important;
         top: auto !important;
@@ -474,51 +467,47 @@ st.markdown(
     + (f" · **{preview_cnt:,} pending review**" if preview_cnt > 0 else "")
 )
 
-# Prominent 3-Step Workflow Banner: Check prices -> Review changes -> Apply selected updates
-with st.container():
-    st.markdown('<div class="workflow-banner">', unsafe_allow_html=True)
-    if is_admin:
-        wf1, wf2, wf3, wf4 = st.columns([2.2, 1.3, 1.2, 1.3])
-        with wf1:
-            selected_models = st.multiselect(
-                "1. Select Products to Check",
-                options=available_models,
-                default=[],
-                placeholder="All Tracked iPhone Models (1,484 variants)",
-            )
-        with wf2:
-            run_mode = st.selectbox(
-                "2. Execution Mode",
-                options=["Preview Changes (Safe)", "Apply Directly to Shopify"],
-                index=0,
-            )
-            apply_immediately = "Apply Directly" in run_mode
-        with wf3:
-            skip_refresh = st.checkbox("Reuse synced catalog", value=True, help="Skip full Shopify GraphQL export for faster checks.")
-        with wf4:
-            st.write("")
-            btn_label = "🔍 Check Prices (Preview)" if not apply_immediately else "⚡ Check & Apply Live"
-            if st.button(btn_label, type="primary", width="stretch"):
-                log_name = launch_repricing_job(selected_models, apply_immediately, skip_refresh)
-                scope = ", ".join(selected_models) if selected_models else "All Models"
-                st.toast(f"Started {run_mode} for {scope}! Logging to {log_name}.", icon="🔍")
-    else:
-        # Simplified Store-Owner Workflow Bar (Always Safe Preview -> Review -> Apply)
-        wf1, wf2 = st.columns([3.5, 1.5])
-        with wf1:
-            selected_models = st.multiselect(
-                "Check Competitor Prices (Step 1: Preview Changes Safely Before Applying)",
-                options=available_models,
-                default=[],
-                placeholder="All Tracked iPhone Models (1,484 variants) — or pick specific models",
-            )
-        with wf2:
-            st.write("")
-            if st.button("🔍 Check Competitor Prices", type="primary", width="stretch"):
-                log_name = launch_repricing_job(selected_models, apply_changes=False, skip_refresh=True)
-                scope = ", ".join(selected_models) if selected_models else "All Models"
-                st.toast(f"Checking competitor prices for {scope} in Preview Mode! Open the Review tab to approve.", icon="🔍")
-    st.markdown("</div>", unsafe_allow_html=True)
+# Prominent Workflow Controls (Directly in Flow without Empty Container Wrapper)
+if is_admin:
+    wf1, wf2, wf3, wf4 = st.columns([2.2, 1.3, 1.2, 1.3])
+    with wf1:
+        selected_models = st.multiselect(
+            "1. Select Products to Check",
+            options=available_models,
+            default=[],
+            placeholder="All Tracked iPhone Models (1,484 variants)",
+        )
+    with wf2:
+        run_mode = st.selectbox(
+            "2. Execution Mode",
+            options=["Preview Changes (Safe)", "Apply Directly to Shopify"],
+            index=0,
+        )
+        apply_immediately = "Apply Directly" in run_mode
+    with wf3:
+        skip_refresh = st.checkbox("Reuse synced catalog", value=True, help="Skip full Shopify GraphQL export for faster checks.")
+    with wf4:
+        st.write("")
+        btn_label = "🔍 Check Prices (Preview)" if not apply_immediately else "⚡ Check & Apply Live"
+        if st.button(btn_label, type="primary", width="stretch"):
+            log_name = launch_repricing_job(selected_models, apply_immediately, skip_refresh)
+            scope = ", ".join(selected_models) if selected_models else "All Models"
+            st.toast(f"Started {run_mode} for {scope}! Logging to {log_name}.", icon="🔍")
+else:
+    wf1, wf2 = st.columns([3.5, 1.5])
+    with wf1:
+        selected_models = st.multiselect(
+            "Check Competitor Prices (Step 1: Preview Changes Safely Before Applying)",
+            options=available_models,
+            default=[],
+            placeholder="All Tracked iPhone Models (1,484 variants) — or pick specific models",
+        )
+    with wf2:
+        st.write("")
+        if st.button("🔍 Check Competitor Prices", type="primary", width="stretch"):
+            log_name = launch_repricing_job(selected_models, apply_changes=False, skip_refresh=True)
+            scope = ", ".join(selected_models) if selected_models else "All Models"
+            st.toast(f"Checking competitor prices for {scope} in Preview Mode! Open the Review tab to approve.", icon="🔍")
 
 # Top Summary Metrics (100% Reconciled)
 m1, m2, m3, m4 = st.columns(4)
