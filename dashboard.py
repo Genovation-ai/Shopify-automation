@@ -11,7 +11,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Pricing Overview | Tech Genius",
-    page_icon="\U0001f4b2",
+    page_icon="💲",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -140,13 +140,13 @@ def get_schedule_details() -> dict:
 
 def toggle_scheduled_task(enable: bool):
     verb = "Enable-ScheduledTask" if enable else "Disable-ScheduledTask"
-    cmd = f"{verb} -TaskName ''{TASK_NAME}''"
+    ps_cmd = f"{verb} -TaskName '{TASK_NAME}'"
     subprocess.run(
         [
             "powershell",
             "-NoProfile",
             "-Command",
-            f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command \"{cmd}\\"'",
+            f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command \"{ps_cmd}\"'",
         ],
         timeout=30,
     )
@@ -228,18 +228,18 @@ def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFra
                 new_str = f"${float(new_p):.2f}" if str(new_p) != "" else "N/A"
                 delta = float(new_p) - float(old_p)
                 delta_str = f"{'+' if delta > 0 else ''}${delta:.2f}"
-                transition = f"{old_str} \u2192 {new_str} ({delta_str})"
+                transition = f"{old_str} → {new_str} ({delta_str})"
             except Exception:
-                transition = f"${old_p} \u2192 ${new_p}"
+                transition = f"${old_p} → ${new_p}"
 
             source = r.get("seller") or r.get("pricing_basis") or meta.get("pricing_basis") or "Verified Competitor"
             ts = str(r.get("timestamp") or r.get("updated_at") or r.get("checked_at") or "Latest Run")[:19].replace("T", " ")
             status_raw = str(r.get("status") or meta.get("status") or "APPLIED_AND_VERIFIED")
-            ver_badge = "\u2705 Verified on Shopify" if "VERIFIED" in status_raw or "CORRECT" in status_raw else status_raw
+            ver_badge = "✅ Verified on Shopify" if "VERIFIED" in status_raw or "CORRECT" in status_raw else status_raw
 
             item = {
                 "Product & Variant": f"{model} {storage} {color} [{cond}]".strip(),
-                "Previous \u2192 New Price": transition,
+                "Previous → New Price": transition,
                 "Source / Rule": str(source)[:60],
                 "Time": ts,
                 "Verification Status": ver_badge,
@@ -257,16 +257,16 @@ def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFra
             try:
                 old_str = f"${float(old_p):.2f}" if str(old_p) != "" else "Synced"
                 new_str = f"${float(new_p):.2f}"
-                transition = f"{old_str} \u2192 {new_str}"
+                transition = f"{old_str} → {new_str}"
             except Exception:
-                transition = f"\u2192 ${new_p}"
+                transition = f"→ ${new_p}"
 
             item = {
                 "Product & Variant": f"{r.get('model', '')} {r.get('storage', '')} {r.get('color', '')} [{r.get('condition', '')}]",
-                "Previous \u2192 New Price": transition,
+                "Previous → New Price": transition,
                 "Source / Rule": str(r.get("reason") or r.get("pricing_basis") or "Competitor Match")[:60],
                 "Time": "Latest Sync",
-                "Verification Status": "\u2705 Verified on Shopify",
+                "Verification Status": "✅ Verified on Shopify",
             }
             if include_ids:
                 item["Variant ID"] = vid
@@ -333,7 +333,7 @@ def push_manual_shopify_price(variant_id: str, new_price_cad: float, reason_labe
         with open(AUDIT_JSONL, "a", encoding="utf-8") as af:
             af.write(json.dumps(audit_entry) + "\n")
 
-        return True, f"Updated {variant_id} (${old_price} \u2192 ${price_str} CAD)"
+        return True, f"Updated {variant_id} (${old_price} → ${price_str} CAD)"
     except Exception as e:
         return False, str(e)
 
@@ -412,17 +412,17 @@ else:
 
 # Sidebar: Schedule Telemetry & View Mode
 with st.sidebar:
-    st.markdown("## \U0001f4b2 Tech Genius Pricing")
+    st.markdown("## 💲 Tech Genius Pricing")
     st.caption("Store-Owner Repricing & Grade Protection")
     st.divider()
 
-    st.markdown("### \U0001f552 Automation Schedule")
+    st.markdown("### ⏲️ Automation Schedule")
     if sched_info["state"] in ("Ready", "Running"):
-        st.success(f"\u25cf Active ({sched_info['state']})")
+        st.success(f"● Active ({sched_info['state']})")
     elif sched_info["state"] == "Disabled":
-        st.warning("\u25cf Paused (Disabled)")
+        st.warning("● Paused (Disabled)")
     else:
-        st.info(f"\u25cf Status: {sched_info['state']}")
+        st.info(f"● Status: {sched_info['state']}")
 
     st.markdown(
         f"**Last successful run:** `{sched_info['last_run']}`  \n"
@@ -434,15 +434,15 @@ with st.sidebar:
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         if sched_info["state"] == "Disabled":
-            if st.button("\u25b6\ufe0f Resume", width="stretch"):
+            if st.button("▶️ Resume", width="stretch"):
                 toggle_scheduled_task(True)
                 st.rerun()
         else:
-            if st.button("\u23f8\ufe0f Pause", width="stretch"):
+            if st.button("⏸️ Pause", width="stretch"):
                 toggle_scheduled_task(False)
                 st.rerun()
     with col_s2:
-        if st.button("\U0001f504 Refresh", width="stretch"):
+        if st.button("🔄 Refresh", width="stretch"):
             st.rerun()
 
     st.divider()
@@ -454,24 +454,24 @@ with st.sidebar:
     is_admin = "Admin" in view_mode
     if is_admin:
         st.caption(
-            f"\U0001f6e0\ufe0f **Admin Mode Active**\n"
-            f"\u2022 Cached URLs: `{len(mappings_data):,}`\n"
-            f"\u2022 Pinned SKUs: `{len(pinned_variants):,}`\n"
-            f"\u2022 Latest Log: `{log_info['filename']}`"
+            f"🛠️ **Admin Mode Active**\n"
+            f"• Cached URLs: `{len(mappings_data):,}`\n"
+            f"• Pinned SKUs: `{len(pinned_variants):,}`\n"
+            f"• Latest Log: `{log_info['filename']}`"
         )
     else:
-        st.caption("\u2728 Simplified view focused on products, proposed price changes, and items needing attention.")
+        st.caption("✨ Simplified view focused on products, proposed price changes, and items needing attention.")
 
 # Header & Reconciled Subtitle
 if is_admin:
-    st.markdown('<div class="admin-badge">\U0001f6e0\ufe0f Admin / Technical View \u2014 Showing GraphQL Variant IDs, URL Cache Editor, Sync Flags & Raw Execution Logs</div>', unsafe_allow_html=True)
+    st.markdown('<div class="admin-badge">🛠️ Admin / Technical View — Showing GraphQL Variant IDs, URL Cache Editor, Sync Flags & Raw Execution Logs</div>', unsafe_allow_html=True)
 
 st.title("Pricing Overview")
 st.markdown(
-    f"**Tracks {total_variants:,} variants** \u00b7 **{priced_cnt:,} priced** "
-    f"({applied_cnt:,} updated, {correct_cnt:,} already aligned) \u00b7 "
+    f"**Tracks {total_variants:,} variants** · **{priced_cnt:,} priced** "
+    f"({applied_cnt:,} updated, {correct_cnt:,} already aligned) · "
     f"**{attention_cnt:,} need attention** ({hold_cnt:,} holds, {unmatched_cnt:,} unmatched)"
-    + (f" \u00b7 **{preview_cnt:,} pending review**" if preview_cnt > 0 else "")
+    + (f" · **{preview_cnt:,} pending review**" if preview_cnt > 0 else "")
 )
 
 # Prominent 3-Step Workflow Banner: Check prices -> Review changes -> Apply selected updates
@@ -497,11 +497,11 @@ with st.container():
             skip_refresh = st.checkbox("Reuse synced catalog", value=True, help="Skip full Shopify GraphQL export for faster checks.")
         with wf4:
             st.write("")
-            btn_label = "\U0001f50d Check Prices (Preview)" if not apply_immediately else "\u26a1 Check & Apply Live"
+            btn_label = "🔍 Check Prices (Preview)" if not apply_immediately else "⚡ Check & Apply Live"
             if st.button(btn_label, type="primary", width="stretch"):
                 log_name = launch_repricing_job(selected_models, apply_immediately, skip_refresh)
                 scope = ", ".join(selected_models) if selected_models else "All Models"
-                st.toast(f"Started {run_mode} for {scope}! Logging to {log_name}.", icon="\U0001f50d")
+                st.toast(f"Started {run_mode} for {scope}! Logging to {log_name}.", icon="🔍")
     else:
         # Simplified Store-Owner Workflow Bar (Always Safe Preview -> Review -> Apply)
         wf1, wf2 = st.columns([3.5, 1.5])
@@ -510,14 +510,14 @@ with st.container():
                 "Check Competitor Prices (Step 1: Preview Changes Safely Before Applying)",
                 options=available_models,
                 default=[],
-                placeholder="All Tracked iPhone Models (1,484 variants) \u2014 or pick specific models",
+                placeholder="All Tracked iPhone Models (1,484 variants) — or pick specific models",
             )
         with wf2:
             st.write("")
-            if st.button("\U0001f50d Check Competitor Prices", type="primary", width="stretch"):
+            if st.button("🔍 Check Competitor Prices", type="primary", width="stretch"):
                 log_name = launch_repricing_job(selected_models, apply_changes=False, skip_refresh=True)
                 scope = ", ".join(selected_models) if selected_models else "All Models"
-                st.toast(f"Checking competitor prices for {scope} in Preview Mode! Open the Review tab to approve.", icon="\U0001f50d")
+                st.toast(f"Checking competitor prices for {scope} in Preview Mode! Open the Review tab to approve.", icon="🔍")
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Top Summary Metrics (100% Reconciled)
@@ -540,7 +540,7 @@ m3.metric(
 m4.metric(
     "Need Attention",
     f"{attention_cnt:,}",
-    f"{hold_cnt:,} holds \u00b7 {unmatched_cnt:,} unmatched",
+    f"{hold_cnt:,} holds · {unmatched_cnt:,} unmatched",
 )
 
 st.divider()
@@ -553,7 +553,7 @@ if is_admin:
         "Review",
         "Rules",
         "History",
-        "\U0001f6e0\ufe0f Admin: URLs & Logs",
+        "🛠️ Admin: URLs & Logs",
     ])
 else:
     tab_overview, tab_products, tab_review, tab_rules, tab_history = st.tabs([
@@ -567,7 +567,7 @@ else:
 # TAB 1: OVERVIEW
 with tab_overview:
     st.subheader("Recent Price Updates")
-    st.caption("Showing verified price transitions (Previous price \u2192 New price), pricing source, timestamp, and Shopify verification status.")
+    st.caption("Showing verified price transitions (Previous price → New price), pricing source, timestamp, and Shopify verification status.")
     df_structured_updates = build_structured_updates_table(df_audit, df_report_full, df_searches, include_ids=is_admin)
     if not df_structured_updates.empty:
         st.dataframe(df_structured_updates, width="stretch", hide_index=True, height=380)
@@ -590,7 +590,7 @@ with tab_overview:
         st.bar_chart(chart_piv, height=300)
 
     if is_admin:
-        st.subheader("\U0001f5a5\ufe0f Live Execution Log Tail (Admin View)")
+        st.subheader("🖥️ Live Execution Log Tail (Admin View)")
         st.caption(f"Log File: `{log_info['filename']}` | Progress: `{log_info['last_group_num']}` | State: `{log_info['end']}`")
         st.code(log_info["raw_tail"] or "No log output available.", language="text")
 
@@ -637,16 +637,16 @@ with tab_products:
                 & (pivot["Good"] > pivot["Fair"])
             )
             pivot["Grade Alignment"] = valid_mask.map(
-                lambda ok: "\u2705 Clean Step-Down" if ok else "\u26a0\ufe0f Needs Attention"
+                lambda ok: "✅ Clean Step-Down" if ok else "⚠️ Needs Attention"
             )
 
         st.dataframe(pivot, width="stretch", hide_index=True, height=440)
 
         if is_admin:
-            st.subheader("\U0001f4cb Raw Variant Report (`catalogue_report.csv` \u2014 Admin View)")
+            st.subheader("📋 Raw Variant Report (`catalogue_report.csv` — Admin View)")
             st.dataframe(df_mat, width="stretch", height=350)
         st.download_button(
-            "\U0001f4e5 Export Filtered Report (.CSV)",
+            "📥 Export Filtered Report (.CSV)",
             data=df_mat.to_csv(index=False).encode("utf-8"),
             file_name=f"pricing_report_{datetime.now().strftime('%Y-%m-%d')}.csv",
             mime="text/csv",
@@ -712,7 +712,7 @@ with tab_review:
             )
 
             selected_to_apply = edited_rev[edited_rev["Apply?"] == True]
-            if st.button(f"\u2705 Apply Selected Updates to Shopify ({len(selected_to_apply)} variants)", type="primary"):
+            if st.button(f"✅ Apply Selected Updates to Shopify ({len(selected_to_apply)} variants)", type="primary"):
                 success_cnt = 0
                 prog = st.progress(0, text="Applying selected prices to Shopify...")
                 total_sel = max(len(selected_to_apply), 1)
@@ -747,11 +747,11 @@ with tab_review:
             ov_model = st.selectbox("Product Model", options=available_models, key="ov_model")
             df_m_sub = df_report_full[df_report_full["model"] == ov_model]
             ov_options = [
-                f"{r['storage']} | {r['color']} | {r['condition']} (${r['proposed_price_cad'] or '0.00'}) \u2014 {r['variant_id']}"
+                f"{r['storage']} | {r['color']} | {r['condition']} (${r['proposed_price_cad'] or '0.00'}) — {r['variant_id']}"
                 for _, r in df_m_sub.iterrows()
             ]
             ov_choice = st.selectbox("Variant", options=ov_options, key="ov_variant")
-            chosen_vid = ov_choice.split(" \u2014 ")[-1].strip() if ov_choice else ""
+            chosen_vid = ov_choice.split(" — ")[-1].strip() if ov_choice else ""
             cur_row = df_m_sub[df_m_sub["variant_id"] == chosen_vid].iloc[0] if chosen_vid else None
             default_p = float(cur_row["proposed_price_cad"]) if (cur_row is not None and str(cur_row["proposed_price_cad"]).replace(".", "", 1).isdigit()) else 499.99
 
@@ -807,7 +807,7 @@ with tab_rules:
             f"**-{new_step_pct:.1f}% per tier** so a lower condition grade is never priced higher than a better grade."
         )
 
-        if st.button("\U0001f4be Save Pricing Rules", type="primary"):
+        if st.button("💾 Save Pricing Rules", type="primary"):
             save_json_file(CONFIG_JSON, {"undercut_cad": new_undercut, "step_down_pct": new_step_pct})
             st.success(f"Saved rules: -${new_undercut:.2f} CAD undercut and -{new_step_pct:.1f}% step-down per grade.")
 
@@ -835,13 +835,13 @@ with tab_history:
     if not df_structured_updates.empty:
         st.dataframe(df_structured_updates, width="stretch", hide_index=True, height=440)
     if is_admin and not df_audit.empty:
-        st.subheader("Raw JSONL Audit Records (`price_update_log.jsonl` \u2014 Admin View)")
+        st.subheader("Raw JSONL Audit Records (`price_update_log.jsonl` — Admin View)")
         st.dataframe(df_audit.iloc[::-1], width="stretch", height=360)
 
 # TAB 6: ADMIN-ONLY WORKSPACE (Rendered ONLY when Admin / Technical View is selected)
 if is_admin:
     with tab_admin:
-        st.subheader("\U0001f517 Competitor URL Cache Manager (`verified_mappings.json`)")
+        st.subheader("🔗 Competitor URL Cache Manager (`verified_mappings.json`)")
         st.caption("Inspect, edit, or add direct Amazon.ca and BestBuy.ca product URLs.")
         if mappings_data:
             rows = []
@@ -860,7 +860,7 @@ if is_admin:
                 mask = df_map.astype(str).apply(lambda x: x.str.contains(map_filter, case=False, na=False)).any(axis=1)
                 df_map = df_map[mask]
             edited_df = st.data_editor(df_map, width="stretch", height=380, num_rows="dynamic")
-            if st.button("\U0001f4be Save URL Cache", type="primary"):
+            if st.button("💾 Save URL Cache", type="primary"):
                 for _, row in edited_df.iterrows():
                     k = row["Product Key"]
                     if k in mappings_data and isinstance(mappings_data[k], dict):
@@ -873,5 +873,5 @@ if is_admin:
                 save_json_file(MAPPINGS_JSON, mappings_data)
                 st.success("Saved updated URLs to verified_mappings.json!")
         st.divider()
-        st.subheader("\U0001f5a5\ufe0f Full Execution Log Tail (`logs/run_*.log`)")
+        st.subheader("🖥️ Full Execution Log Tail (`logs/run_*.log`)")
         st.code(log_info["raw_tail"] or "No log output available.", language="text")
