@@ -46,14 +46,18 @@ st.markdown("""
         margin-bottom: 18px;
     }
     .admin-badge {
+        position: relative !important;
+        top: auto !important;
+        left: auto !important;
+        z-index: 1 !important;
         background-color: #312e81;
         border: 1px solid #4f46e5;
         color: #e0e7ff;
-        padding: 6px 12px;
+        padding: 8px 14px;
         border-radius: 6px;
         font-size: 0.85rem;
-        margin-bottom: 12px;
-        display: inline-block;
+        margin-bottom: 14px;
+        display: block;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -142,7 +146,7 @@ def toggle_scheduled_task(enable: bool):
             "powershell",
             "-NoProfile",
             "-Command",
-            f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command \"{cmd}\"'",
+            f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command \"{cmd}\\"'",
         ],
         timeout=30,
     )
