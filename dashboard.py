@@ -30,7 +30,8 @@ TASK_NAME = "Tech Genius Shopify Repricer"
 
 st.markdown("""
 <style>
-    .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+    /* Ensure the main container has enough top clearance so banners aren't clipped */
+    .block-container { padding-top: 3.8rem !important; padding-bottom: 2rem; }
     div[data-testid="stMetric"] {
         background-color: #111827;
         border: 1px solid #1f2937;
@@ -46,10 +47,10 @@ st.markdown("""
         background-color: #312e81;
         border: 1px solid #4f46e5;
         color: #e0e7ff;
-        padding: 8px 14px;
+        padding: 10px 16px;
         border-radius: 6px;
-        font-size: 0.85rem;
-        margin-bottom: 14px;
+        font-size: 0.9rem;
+        margin-bottom: 16px;
         display: block;
     }
 </style>
@@ -455,7 +456,7 @@ with st.sidebar:
     else:
         st.caption("✨ Simplified view focused on products, proposed price changes, and items needing attention.")
 
-# Header & Reconciled Subtitle
+# Header & Reconciled Subtitle (Placed below top margin spacing)
 if is_admin:
     st.markdown('<div class="admin-badge">🛠️ Admin / Technical View — Showing GraphQL Variant IDs, URL Cache Editor, Sync Flags & Raw Execution Logs</div>', unsafe_allow_html=True)
 
@@ -467,7 +468,7 @@ st.markdown(
     + (f" · **{preview_cnt:,} pending review**" if preview_cnt > 0 else "")
 )
 
-# Prominent Workflow Controls (Directly in Flow without Empty Container Wrapper)
+# Prominent Workflow Controls
 if is_admin:
     wf1, wf2, wf3, wf4 = st.columns([2.2, 1.3, 1.2, 1.3])
     with wf1:
