@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 import pandas as pd
 import requests
 import streamlit as st
@@ -44,6 +44,16 @@ st.markdown("""
         border-radius: 10px;
         padding: 14px 20px;
         margin-bottom: 18px;
+    }
+    .admin-badge {
+        background-color: #312e81;
+        border: 1px solid #4f46e5;
+        color: #e0e7ff;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        margin-bottom: 12px;
+        display: inline-block;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -170,7 +180,7 @@ def parse_log_summary(log_path: Path):
         "start": start_line.replace("===", "").strip(),
         "end": end_line.replace("===", "").strip(),
         "last_group_num": last_group_num,
-        "raw_tail": "\n".join(lines[-45:]),
+        "raw_tail": "\n".join(lines[-50:]),
     }
 
 
@@ -189,8 +199,7 @@ def load_audit_log():
     return pd.DataFrame(records)
 
 
-def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFrame, df_searches: pd.DataFrame) -> pd.DataFrame:
-    """Create a structured table showing Previous price -> New price, source, time, and verification status."""
+def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFrame, df_searches: pd.DataFrame, include_ids: bool = False) -> pd.DataFrame:
     search_price_map = {}
     if not df_searches.empty and "variant_id" in df_searches.columns and "current_price" in df_searches.columns:
         search_price_map = df_searches.set_index("variant_id")["current_price"].to_dict()
@@ -224,14 +233,16 @@ def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFra
             status_raw = str(r.get("status") or meta.get("status") or "APPLIED_AND_VERIFIED")
             ver_badge = "\u2705 Verified on Shopify" if "VERIFIED" in status_raw or "CORRECT" in status_raw else status_raw
 
-            rows.append({
+            item = {
                 "Product & Variant": f"{model} {storage} {color} [{cond}]".strip(),
                 "Previous \u2192 New Price": transition,
-                "Source / Rule": str(source)[:55],
+                "Source / Rule": str(source)[:60],
                 "Time": ts,
                 "Verification Status": ver_badge,
-                "Variant ID": vid,
-            })
+            }
+            if include_ids:
+                item["Variant ID"] = vid
+            rows.append(item)
 
     if not rows and not df_report.empty:
         applied_df = df_report[df_report["status"] == "APPLIED_AND_VERIFIED"].head(50)
@@ -246,14 +257,16 @@ def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFra
             except Exception:
                 transition = f"\u2192 ${new_p}"
 
-            rows.append({
+            item = {
                 "Product & Variant": f"{r.get('model', '')} {r.get('storage', '')} {r.get('color', '')} [{r.get('condition', '')}]",
                 "Previous \u2192 New Price": transition,
-                "Source / Rule": str(r.get("reason") or r.get("pricing_basis") or "Competitor Match")[:55],
+                "Source / Rule": str(r.get("reason") or r.get("pricing_basis") or "Competitor Match")[:60],
                 "Time": "Latest Sync",
                 "Verification Status": "\u2705 Verified on Shopify",
-                "Variant ID": vid,
-            })
+            }
+            if include_ids:
+                item["Variant ID"] = vid
+            rows.append(item)
 
     return pd.DataFrame(rows)
 
@@ -435,8 +448,20 @@ with st.sidebar:
         index=0,
     )
     is_admin = "Admin" in view_mode
+    if is_admin:
+        st.caption(
+            f"\U0001f6e0\ufe0f **Admin Mode Active**\n"
+            f"\u2022 Cached URLs: `{len(mappings_data):,}`\n"
+            f"\u2022 Pinned SKUs: `{len(pinned_variants):,}`\n"
+            f"\u2022 Latest Log: `{log_info['filename']}`"
+        )
+    else:
+        st.caption("\u2728 Simplified view focused on products, proposed price changes, and items needing attention.")
 
 # Header & Reconciled Subtitle
+if is_admin:
+    st.markdown('<div class="admin-badge">\U0001f6e0\ufe0f Admin / Technical View \u2014 Showing GraphQL Variant IDs, URL Cache Editor, Sync Flags & Raw Execution Logs</div>', unsafe_allow_html=True)
+
 st.title("Pricing Overview")
 st.markdown(
     f"**Tracks {total_variants:,} variants** \u00b7 **{priced_cnt:,} priced** "
@@ -448,30 +473,47 @@ st.markdown(
 # Prominent 3-Step Workflow Banner: Check prices -> Review changes -> Apply selected updates
 with st.container():
     st.markdown('<div class="workflow-banner">', unsafe_allow_html=True)
-    wf1, wf2, wf3, wf4 = st.columns([2.2, 1.3, 1.2, 1.3])
-    with wf1:
-        selected_models = st.multiselect(
-            "1. Select Products to Check",
-            options=available_models,
-            default=[],
-            placeholder="All Tracked iPhone Models (1,484 variants)",
-        )
-    with wf2:
-        run_mode = st.selectbox(
-            "2. Execution Mode",
-            options=["Preview Changes (Safe)", "Apply Directly to Shopify"],
-            index=0,  # Default to Preview!
-        )
-        apply_immediately = "Apply Directly" in run_mode
-    with wf3:
-        skip_refresh = st.checkbox("Reuse synced catalog", value=True, help="Skip full Shopify GraphQL export for faster checks.")
-    with wf4:
-        st.write("")
-        btn_label = "\U0001f50d Check Prices (Preview)" if not apply_immediately else "\u26a1 Check & Apply Live"
-        if st.button(btn_label, type="primary", width="stretch"):
-            log_name = launch_repricing_job(selected_models, apply_immediately, skip_refresh)
-            scope = ", ".join(selected_models) if selected_models else "All Models"
-            st.toast(f"Started {run_mode} for {scope}! Open the Review tab as results arrive.", icon="\U0001f50d")
+    if is_admin:
+        wf1, wf2, wf3, wf4 = st.columns([2.2, 1.3, 1.2, 1.3])
+        with wf1:
+            selected_models = st.multiselect(
+                "1. Select Products to Check",
+                options=available_models,
+                default=[],
+                placeholder="All Tracked iPhone Models (1,484 variants)",
+            )
+        with wf2:
+            run_mode = st.selectbox(
+                "2. Execution Mode",
+                options=["Preview Changes (Safe)", "Apply Directly to Shopify"],
+                index=0,
+            )
+            apply_immediately = "Apply Directly" in run_mode
+        with wf3:
+            skip_refresh = st.checkbox("Reuse synced catalog", value=True, help="Skip full Shopify GraphQL export for faster checks.")
+        with wf4:
+            st.write("")
+            btn_label = "\U0001f50d Check Prices (Preview)" if not apply_immediately else "\u26a1 Check & Apply Live"
+            if st.button(btn_label, type="primary", width="stretch"):
+                log_name = launch_repricing_job(selected_models, apply_immediately, skip_refresh)
+                scope = ", ".join(selected_models) if selected_models else "All Models"
+                st.toast(f"Started {run_mode} for {scope}! Logging to {log_name}.", icon="\U0001f50d")
+    else:
+        # Simplified Store-Owner Workflow Bar (Always Safe Preview -> Review -> Apply)
+        wf1, wf2 = st.columns([3.5, 1.5])
+        with wf1:
+            selected_models = st.multiselect(
+                "Check Competitor Prices (Step 1: Preview Changes Safely Before Applying)",
+                options=available_models,
+                default=[],
+                placeholder="All Tracked iPhone Models (1,484 variants) \u2014 or pick specific models",
+            )
+        with wf2:
+            st.write("")
+            if st.button("\U0001f50d Check Competitor Prices", type="primary", width="stretch"):
+                log_name = launch_repricing_job(selected_models, apply_changes=False, skip_refresh=True)
+                scope = ", ".join(selected_models) if selected_models else "All Models"
+                st.toast(f"Checking competitor prices for {scope} in Preview Mode! Open the Review tab to approve.", icon="\U0001f50d")
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Top Summary Metrics (100% Reconciled)
@@ -499,24 +541,34 @@ m4.metric(
 
 st.divider()
 
-# Simple 5-Tab Navigation
-tab_overview, tab_products, tab_review, tab_rules, tab_history = st.tabs([
-    "Overview",
-    "Products",
-    "Review",
-    "Rules",
-    "History",
-])
+# Navigation Tabs: 5 Simple Tabs in Store-Owner View; 6 Tabs (+ Technical Diagnostics) in Admin View
+if is_admin:
+    tab_overview, tab_products, tab_review, tab_rules, tab_history, tab_admin = st.tabs([
+        "Overview",
+        "Products",
+        "Review",
+        "Rules",
+        "History",
+        "\U0001f6e0\ufe0f Admin: URLs & Logs",
+    ])
+else:
+    tab_overview, tab_products, tab_review, tab_rules, tab_history = st.tabs([
+        "Overview",
+        "Products",
+        "Review",
+        "Rules",
+        "History",
+    ])
 
 # TAB 1: OVERVIEW
 with tab_overview:
     st.subheader("Recent Price Updates")
     st.caption("Showing verified price transitions (Previous price \u2192 New price), pricing source, timestamp, and Shopify verification status.")
-    df_structured_updates = build_structured_updates_table(df_audit, df_report_full, df_searches)
+    df_structured_updates = build_structured_updates_table(df_audit, df_report_full, df_searches, include_ids=is_admin)
     if not df_structured_updates.empty:
         st.dataframe(df_structured_updates, width="stretch", hide_index=True, height=380)
     else:
-        st.info("No price updates recorded yet. Click 'Check Prices (Preview)' above to begin.")
+        st.info("No price updates recorded yet. Click 'Check Competitor Prices' above to begin.")
 
     if not df_report_full.empty:
         st.subheader("Catalog Health by iPhone Model")
@@ -533,7 +585,8 @@ with tab_overview:
         chart_piv = df_chart.groupby(["model", "Category"]).size().unstack(fill_value=0)
         st.bar_chart(chart_piv, height=300)
 
-    with st.expander("Technical details (Execution Logs & Diagnostics)", expanded=is_admin):
+    if is_admin:
+        st.subheader("\U0001f5a5\ufe0f Live Execution Log Tail (Admin View)")
         st.caption(f"Log File: `{log_info['filename']}` | Progress: `{log_info['last_group_num']}` | State: `{log_info['end']}`")
         st.code(log_info["raw_tail"] or "No log output available.", language="text")
 
@@ -585,14 +638,15 @@ with tab_products:
 
         st.dataframe(pivot, width="stretch", hide_index=True, height=440)
 
-        with st.expander("View Full Underlying Variant Report (1,484 rows) & Export CSV", expanded=is_admin):
+        if is_admin:
+            st.subheader("\U0001f4cb Raw Variant Report (`catalogue_report.csv` \u2014 Admin View)")
             st.dataframe(df_mat, width="stretch", height=350)
-            st.download_button(
-                "\U0001f4e5 Export Report (.CSV)",
-                data=df_mat.to_csv(index=False).encode("utf-8"),
-                file_name=f"pricing_report_{datetime.now().strftime('%Y-%m-%d')}.csv",
-                mime="text/csv",
-            )
+        st.download_button(
+            "\U0001f4e5 Export Filtered Report (.CSV)",
+            data=df_mat.to_csv(index=False).encode("utf-8"),
+            file_name=f"pricing_report_{datetime.now().strftime('%Y-%m-%d')}.csv",
+            mime="text/csv",
+        )
 
 # TAB 3: REVIEW (Review & Apply Selected Updates + Issues Requiring Action)
 with tab_review:
@@ -643,11 +697,13 @@ with tab_review:
                 "variant_id": df_rev["variant_id"],
             })
 
+            col_cfg = {"variant_id": None} if not is_admin else {}
             edited_rev = st.data_editor(
                 df_rev_display.head(150),
                 width="stretch",
                 hide_index=True,
                 height=340,
+                column_config=col_cfg,
                 disabled=["Model", "Storage", "Colour", "Condition", "Previous Price ($)", "Pricing Rule / Source", "Current Status", "variant_id"],
             )
 
@@ -668,7 +724,7 @@ with tab_review:
                 st.success(f"Applied and verified {success_cnt}/{len(selected_to_apply)} variant prices on Shopify!")
                 st.rerun()
         else:
-            st.info("No pending preview proposals right now. Run 'Check Prices (Preview)' above or switch the dropdown to 'All Variants With Proposed Prices'.")
+            st.info("No pending preview proposals right now. Click 'Check Competitor Prices' above or switch the dropdown to 'All Variants With Proposed Prices'.")
 
     st.divider()
     col_act1, col_act2 = st.columns([1.3, 1])
@@ -676,9 +732,8 @@ with tab_review:
         st.subheader(f"Step 2: Issues Requiring Attention ({attention_cnt:,} variants)")
         st.caption(f"Mutually exclusive breakdown: **{hold_cnt:,} Holds** (missing anchor grade) and **{unmatched_cnt:,} Unmatched** (no Amazon/BestBuy listing found).")
         if not df_report_full.empty:
-            df_issues = df_report_full[~df_report_full["status"].isin(["APPLIED_AND_VERIFIED", "ALREADY_CORRECT", "PREVIEW"])][
-                ["model", "storage", "color", "condition", "status", "reason", "variant_id"]
-            ]
+            issue_cols = ["model", "storage", "color", "condition", "status", "reason"] + (["variant_id"] if is_admin else [])
+            df_issues = df_report_full[~df_report_full["status"].isin(["APPLIED_AND_VERIFIED", "ALREADY_CORRECT", "PREVIEW"])][issue_cols]
             st.dataframe(df_issues, width="stretch", hide_index=True, height=320)
 
     with col_act2:
@@ -769,7 +824,21 @@ with tab_rules:
         ])
         st.table(preview_df)
 
-    with st.expander("Technical details: Competitor URL Cache Manager (`verified_mappings.json`)", expanded=is_admin):
+# TAB 5: HISTORY
+with tab_history:
+    st.subheader("Verified Price Change History")
+    st.caption("Complete audit trail of all price updates written to Shopify.")
+    if not df_structured_updates.empty:
+        st.dataframe(df_structured_updates, width="stretch", hide_index=True, height=440)
+    if is_admin and not df_audit.empty:
+        st.subheader("Raw JSONL Audit Records (`price_update_log.jsonl` \u2014 Admin View)")
+        st.dataframe(df_audit.iloc[::-1], width="stretch", height=360)
+
+# TAB 6: ADMIN-ONLY WORKSPACE (Rendered ONLY when Admin / Technical View is selected)
+if is_admin:
+    with tab_admin:
+        st.subheader("\U0001f517 Competitor URL Cache Manager (`verified_mappings.json`)")
+        st.caption("Inspect, edit, or add direct Amazon.ca and BestBuy.ca product URLs.")
         if mappings_data:
             rows = []
             for key, val in mappings_data.items():
@@ -786,8 +855,8 @@ with tab_rules:
             if map_filter:
                 mask = df_map.astype(str).apply(lambda x: x.str.contains(map_filter, case=False, na=False)).any(axis=1)
                 df_map = df_map[mask]
-            edited_df = st.data_editor(df_map, width="stretch", height=340, num_rows="dynamic")
-            if st.button("Save URL Cache"):
+            edited_df = st.data_editor(df_map, width="stretch", height=380, num_rows="dynamic")
+            if st.button("\U0001f4be Save URL Cache", type="primary"):
                 for _, row in edited_df.iterrows():
                     k = row["Product Key"]
                     if k in mappings_data and isinstance(mappings_data[k], dict):
@@ -799,13 +868,6 @@ with tab_rules:
                         mappings_data[k] = row["Amazon URL"]
                 save_json_file(MAPPINGS_JSON, mappings_data)
                 st.success("Saved updated URLs to verified_mappings.json!")
-
-# TAB 5: HISTORY
-with tab_history:
-    st.subheader("Verified Price Change History")
-    st.caption("Complete audit trail of all price updates written to Shopify.")
-    if not df_structured_updates.empty:
-        st.dataframe(df_structured_updates, width="stretch", hide_index=True, height=440)
-    if not df_audit.empty:
-        with st.expander("Raw JSONL Audit Records (`price_update_log.jsonl`)", expanded=is_admin):
-            st.dataframe(df_audit.iloc[::-1], width="stretch", height=360)
+        st.divider()
+        st.subheader("\U0001f5a5\ufe0f Full Execution Log Tail (`logs/run_*.log`)")
+        st.code(log_info["raw_tail"] or "No log output available.", language="text")
