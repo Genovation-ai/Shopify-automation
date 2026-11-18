@@ -4,7 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
+from decimal import Decimal
 import pandas as pd
+import requests
 import streamlit as st
 
 st.set_page_config(
@@ -21,6 +23,8 @@ SEARCHES_CSV = BASE_DIR / "competitor_searches.csv"
 AUDIT_JSONL = BASE_DIR / "price_update_log.jsonl"
 MAPPINGS_JSON = BASE_DIR / "verified_mappings.json"
 TARGETS_JSON = BASE_DIR / "approved_targets.json"
+CONFIG_JSON = BASE_DIR / "pricing_config.json"
+PINS_JSON = BASE_DIR / "pinned_variants.json"
 TASK_NAME = "Tech Genius Shopify Repricer"
 
 st.markdown("""
@@ -35,6 +39,93 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+def load_json_file(path: Path, default=None):
+    if default is None:
+        default = {}
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return default
+
+
+def save_json_file(path: Path, data):
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def load_pricing_config():
+    cfg = load_json_file(CONFIG_JSON, {"undercut_cad": 3.00, "step_down_pct": 5.0})
+    return {
+        "undercut_cad": float(cfg.get("undercut_cad", 3.00)),
+        "step_down_pct": float(cfg.get("step_down_pct", 5.0)),
+    }
+
+
+def push_manual_shopify_price(variant_id: str, new_price_cad: float) -> tuple[bool, str]:
+    try:
+        import shopify_check as shopify
+        from batch_proposals import read_variant
+
+        variant = read_variant(variant_id)
+        product_id = variant["product"]["id"]
+        old_price = variant["price"]
+        price_str = f"{Decimal(str(new_price_cad)):.2f}"
+
+        mutation = """
+        mutation UpdateVariantPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            productVariants { id price }
+            userErrors { field message }
+          }
+        }
+        """
+        resp = requests.post(
+            f"https://{shopify.domain}/admin/api/2026-10/graphql.json",
+            headers={"X-Shopify-Access-Token": shopify.token},
+            json={
+                "query": mutation,
+                "variables": {
+                    "productId": product_id,
+                    "variants": [{"id": variant_id, "price": price_str}],
+                },
+            },
+            timeout=30,
+        )
+        data = resp.json()
+        errors = data.get("data", {}).get("productVariantsBulkUpdate", {}).get("userErrors", [])
+        if errors:
+            return False, str(errors)
+
+        # Update catalogue_report.csv and price_update_log.jsonl
+        if REPORT_CSV.exists():
+            df_rep = pd.read_csv(REPORT_CSV)
+            mask = df_rep["variant_id"] == variant_id
+            if mask.any():
+                df_rep.loc[mask, "proposed_price_cad"] = price_str
+                df_rep.loc[mask, "status"] = "APPLIED_AND_VERIFIED"
+                df_rep.loc[mask, "pricing_basis"] = "MANUAL_UI_OVERRIDE"
+                df_rep.loc[mask, "reason"] = f"Manual UI Override (${old_price} -> ${price_str} CAD)"
+                df_rep.to_csv(REPORT_CSV, index=False)
+
+        audit_entry = {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "variant_id": variant_id,
+            "product_id": product_id,
+            "old_price_cad": str(old_price),
+            "new_price_cad": price_str,
+            "status": "APPLIED_AND_VERIFIED",
+            "pricing_basis": "MANUAL_UI_OVERRIDE",
+            "seller": "Manual Dashboard Override",
+        }
+        with open(AUDIT_JSONL, "a", encoding="utf-8") as af:
+            af.write(json.dumps(audit_entry) + "\n")
+
+        return True, f"Updated {variant_id} from ${old_price} to ${price_str} CAD on Shopify!"
+    except Exception as e:
+        return False, str(e)
 
 
 def get_task_status() -> str:
@@ -108,7 +199,7 @@ def parse_log_summary(log_path: Path):
         elif "UPDATED AND VERIFIED:" in l:
             detail = l.replace("UPDATED AND VERIFIED:", "").strip()
             updates.append(f"{current_product} \u2014 {detail}" if current_product else detail)
-        elif " CAP]" in l:
+        elif " CAP]" in l or "FALLBACK STEP-DOWN]" in l:
             caps.append(l.strip())
         elif "[VERY GOOD HOLD]" in l:
             holds.append(l.replace("[VERY GOOD HOLD]", "").strip())
@@ -151,15 +242,6 @@ def load_audit_log():
     return pd.DataFrame(records)
 
 
-def load_json_file(path: Path):
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return {}
-
-
 def launch_repricing_job(selected_models, apply_changes: bool, skip_refresh: bool):
     LOGS_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -171,20 +253,11 @@ def launch_repricing_job(selected_models, apply_changes: bool, skip_refresh: boo
     skip_flag = "--skip-catalog-refresh" if skip_refresh else ""
 
     script_code = f'''import subprocess, sys
-import pandas as pd
 from pathlib import Path
 
 folder = Path({repr(str(BASE_DIR))})
-report_csv = folder / "catalogue_report.csv"
-backup_csv = folder / "catalogue_report_ui_backup.csv"
 models = {models_repr}
 log_path = Path({repr(str(log_file))})
-
-other_df = None
-if models and report_csv.exists():
-    full_df = pd.read_csv(report_csv)
-    other_df = full_df[~full_df["model"].isin(models)]
-    other_df.to_csv(backup_csv, index=False)
 
 cmd = [sys.executable, "-u", str(folder / "scheduled_run.py"), "--approve-all"]
 if {repr(bool(apply_flag))}:
@@ -205,14 +278,6 @@ with open(log_path, "w", encoding="utf-8") as lf:
         lf.write(line)
         lf.flush()
     proc.wait()
-
-if other_df is not None and report_csv.exists():
-    new_df = pd.read_csv(report_csv)
-    merged = pd.concat([other_df, new_df], ignore_index=True)
-    merged.to_csv(report_csv, index=False)
-    if backup_csv.exists():
-        backup_csv.unlink()
-    print(f"\\nMerged targeted models into catalogue_report.csv (Total rows: {{len(merged)}})")
 '''
     runner_script.write_text(script_code, encoding="utf-8")
     subprocess.Popen(
@@ -225,6 +290,8 @@ if other_df is not None and report_csv.exists():
 
 df_report_full = pd.read_csv(REPORT_CSV) if REPORT_CSV.exists() else pd.DataFrame()
 available_models = sorted(df_report_full["model"].dropna().unique().tolist()) if not df_report_full.empty else []
+pricing_cfg = load_pricing_config()
+pinned_variants = load_json_file(PINS_JSON, {})
 
 with st.sidebar:
     st.markdown("## \u26a1 Tech Genius AI")
@@ -257,7 +324,7 @@ with st.sidebar:
         "Target Models (leave empty for Full Catalogue)",
         options=available_models,
         default=[],
-        placeholder="All Models (1,476 variants)",
+        placeholder="All Models (1,484 variants)",
     )
     apply_live = st.checkbox("Apply live price updates to Shopify", value=True)
     skip_refresh = st.checkbox("Fast start (reuse synced Shopify catalog)", value=True)
@@ -275,18 +342,29 @@ with st.sidebar:
         st.toast(f"Launched {scope} run! Logging to {log_name}", icon="\U0001f680")
 
     st.divider()
-    st.markdown("### \U0001f6e1\ufe0f Active Pricing Rules")
-    st.caption(
-        "\u2022 **Excellent:** Amazon.ca (`-$3.00 CAD`)\n"
-        "\u2022 **Very Good:** `(Good + Excellent) / 2` (capped `-5%` below Excellent)\n"
-        "\u2022 **Good:** BestBuy.ca (`-$3.00 CAD`, capped `-5%` below Very Good)\n"
-        "\u2022 **Fair:** BestBuy.ca (`-$3.00 CAD`, capped `-5%` below Good)"
+    st.markdown("### \u2699\ufe0f Pricing Rules Configurator")
+    new_undercut = st.number_input(
+        "Competitor Undercut ($ CAD)",
+        min_value=0.0,
+        max_value=50.0,
+        value=float(pricing_cfg["undercut_cad"]),
+        step=0.50,
     )
+    new_step_pct = st.slider(
+        "Grade Hierarchy Step-Down (%)",
+        min_value=1.0,
+        max_value=15.0,
+        value=float(pricing_cfg["step_down_pct"]),
+        step=0.5,
+    )
+    if st.button("\U0001f4be Save Pricing Rules", width="stretch"):
+        save_json_file(CONFIG_JSON, {"undercut_cad": new_undercut, "step_down_pct": new_step_pct})
+        st.success(f"Saved: -${new_undercut:.2f} CAD undercut, -{new_step_pct:.1f}% grade step-down!")
 
 st.title("\u26a1 Automated Shopify Repricing Dashboard")
-st.caption("Real-time competitor price intelligence across Amazon.ca & BestBuy.ca with 5% multi-grade step-down protection.")
+st.caption("Real-time competitor price intelligence across Amazon.ca & BestBuy.ca covering 100% of active Shopify iPhone listings.")
 
-mappings_data = load_json_file(MAPPINGS_JSON)
+mappings_data = load_json_file(MAPPINGS_JSON, {})
 
 if not df_report_full.empty:
     status_counts = df_report_full["status"].value_counts().to_dict()
@@ -308,14 +386,14 @@ k1.metric(
     f"{coverage_pct:.1f}% Store Coverage ({applied_cnt:,} Updated, {correct_cnt:,} Correct)",
 )
 k2.metric(
-    "Safety Holds Applied",
+    "Safety Holds Remaining",
     f"{hold_cnt:,}",
-    "5% Grade Hierarchy Cap Active",
+    f"-{pricing_cfg['step_down_pct']:.0f}% Grade Hierarchy Cap Active",
 )
 k3.metric(
     "Unmatched / No Candidate",
     f"{no_cand_cnt:,}",
-    f"Last Run: {log_info['last_group_num']}",
+    f"{len(pinned_variants)} Pinned Overrides",
 )
 k4.metric(
     "Cached Competitor URLs",
@@ -325,9 +403,10 @@ k4.metric(
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "\U0001f4ca Live Overview & Logs",
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "\U0001f4ca Live Overview & Analytics",
     "\U0001f4b2 Grade Hierarchy Matrix",
+    "\U0001f6e0\ufe0f Manual Override & Quick-Fix Queue",
     "\U0001f4cb Full Catalogue Report",
     "\U0001f517 Competitor URL Manager",
     "\U0001f4dc Verified Audit History",
@@ -339,12 +418,12 @@ with tab1:
         st.subheader("\u2705 Latest Verified Shopify Updates")
         if log_info["recent_updates"]:
             df_recent = pd.DataFrame({"Product, Grade, Variant & Verified Shopify Price": log_info["recent_updates"]})
-            st.dataframe(df_recent, width="stretch", hide_index=True, height=420)
+            st.dataframe(df_recent, width="stretch", hide_index=True, height=380)
         elif not df_report_full.empty:
             df_applied = df_report_full[df_report_full["status"] == "APPLIED_AND_VERIFIED"][
                 ["model", "storage", "color", "condition", "proposed_price_cad", "pricing_basis"]
             ]
-            st.dataframe(df_applied, width="stretch", hide_index=True, height=420)
+            st.dataframe(df_applied, width="stretch", hide_index=True, height=380)
         else:
             st.info("No variant updates recorded yet.")
 
@@ -352,16 +431,27 @@ with tab1:
         st.subheader("\U0001f5a5\ufe0f Live Execution Log Tail")
         st.code(log_info["raw_tail"] or "No log output available.", language="text")
 
+    if not df_report_full.empty:
+        st.divider()
+        st.subheader("\U0001f4c8 Store Coverage Breakdown by iPhone Model")
+        df_chart = df_report_full.copy()
+        df_chart["Coverage Status"] = df_chart["status"].map(
+            lambda s: "Actively Priced" if s in ("APPLIED_AND_VERIFIED", "ALREADY_CORRECT") else s
+        )
+        chart_piv = df_chart.groupby(["model", "Coverage Status"]).size().unstack(fill_value=0)
+        st.bar_chart(chart_piv, height=320)
+
 with tab2:
     st.subheader("\U0001f4b2 Storefront Grade Hierarchy Matrix (`Excellent > Very Good > Good > Fair`)")
     st.caption("Inspect side-by-side condition pricing for every model, storage, and colour to verify clean 5% tier step-downs.")
     if not df_report_full.empty:
         col_m1, col_m2 = st.columns([1, 2])
         with col_m1:
+            default_idx = (available_models.index("iPhone 15 Pro Max") + 1) if "iPhone 15 Pro Max" in available_models else 0
             model_pick = st.selectbox(
                 "Select iPhone Model",
                 options=["All Models"] + available_models,
-                index=(available_models.index("iPhone 14") + 1) if "iPhone 14" in available_models else 0,
+                index=default_idx,
             )
         df_mat = df_report_full.copy()
         if model_pick != "All Models":
@@ -395,13 +485,69 @@ with tab2:
         st.warning("`catalogue_report.csv` not found.")
 
 with tab3:
-    st.subheader("\U0001f4cb Full Catalogue Repricing Report")
+    col_ov1, col_ov2 = st.columns([1, 1])
+    with col_ov1:
+        st.subheader("\U0001f4cc Manual Shopify Price Override & Pinning")
+        st.caption("Push an instant custom price to Shopify for any variant and optionally lock it from automated changes.")
+        if not df_report_full.empty:
+            ov_model = st.selectbox("1. Choose Model", options=available_models, key="ov_model")
+            df_m_sub = df_report_full[df_report_full["model"] == ov_model]
+            ov_options = [
+                f"{r['storage']} | {r['color']} | {r['condition']} (Current: ${r['proposed_price_cad'] or '0.00'}) — {r['variant_id']}"
+                for _, r in df_m_sub.iterrows()
+            ]
+            ov_choice = st.selectbox("2. Choose Variant", options=ov_options, key="ov_variant")
+            chosen_vid = ov_choice.split(" \u2014 ")[-1].strip() if ov_choice else ""
+            cur_row = df_m_sub[df_m_sub["variant_id"] == chosen_vid].iloc[0] if chosen_vid else None
+            default_p = float(cur_row["proposed_price_cad"]) if (cur_row is not None and str(cur_row["proposed_price_cad"]).replace(".", "", 1).isdigit()) else 499.99
+
+            custom_price = st.number_input("3. New Shopify Price ($ CAD)", min_value=1.0, max_value=5000.0, value=default_p, step=1.0)
+            pin_variant = st.checkbox("Lock / Pin this variant (skip during automated runs)", value=(chosen_vid in pinned_variants))
+
+            if st.button("\u26a1 Push Live Price to Shopify Now", type="primary", width="stretch"):
+                ok, msg = push_manual_shopify_price(chosen_vid, custom_price)
+                if ok:
+                    if pin_variant:
+                        pinned_variants[chosen_vid] = {
+                            "model": ov_model,
+                            "price_cad": f"{custom_price:.2f}",
+                            "pinned_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                    elif chosen_vid in pinned_variants:
+                        del pinned_variants[chosen_vid]
+                    save_json_file(PINS_JSON, pinned_variants)
+                    st.success(msg)
+                else:
+                    st.error(f"Shopify update failed: {msg}")
+
+    with col_ov2:
+        st.subheader("\U0001f50d Unmatched (`NO_CANDIDATE`) & `HOLD` Quick-Fix Queue")
+        st.caption("Variants currently needing competitor URL mapping or next full-catalogue cascade pass.")
+        if not df_report_full.empty:
+            df_unmatched = df_report_full[df_report_full["status"].isin(["NO_CANDIDATE", "HOLD"])][
+                ["model", "storage", "color", "condition", "status", "reason", "variant_id"]
+            ]
+            st.dataframe(df_unmatched, width="stretch", hide_index=True, height=340)
+
+            with st.expander("\u2795 Add Competitor URL to Cache for Unmatched Variant"):
+                q_key = st.text_input("Mapping Key (e.g. `iPhone 13|128GB|Midnight|Excellent`)", placeholder="Model|Storage|Color|Condition")
+                q_url = st.text_input("Direct Amazon.ca or BestBuy.ca Product URL", placeholder="https://www.amazon.ca/dp/...")
+                if st.button("Save Mapping URL"):
+                    if q_key and q_url:
+                        mappings_data[q_key.strip()] = q_url.strip()
+                        save_json_file(MAPPINGS_JSON, mappings_data)
+                        st.success(f"Added `{q_key}` to `verified_mappings.json`!")
+                    else:
+                        st.warning("Enter both a Mapping Key and URL.")
+
+with tab4:
+    st.subheader("\U0001f4cb Full Catalogue Repricing Report (1,484 Active Variants)")
     if not df_report_full.empty:
         f_col1, f_col2 = st.columns([2, 1])
         with f_col1:
             search_q = st.text_input(
                 "\U0001f50d Filter by Model, Storage, Colour, or Condition Grade",
-                placeholder="e.g. iPhone 14 128GB Midnight",
+                placeholder="e.g. iPhone 15 Pro Max 1TB",
             )
         with f_col2:
             status_filter = st.multiselect(
@@ -425,7 +571,7 @@ with tab3:
     else:
         st.warning("`catalogue_report.csv` not found in the directory yet.")
 
-with tab4:
+with tab5:
     st.subheader("\U0001f517 Interactive Competitor URL Manager (`verified_mappings.json`)")
     st.caption("Double-click any cell below to view or update cached Amazon & Best Buy product URLs, then click Save.")
     if mappings_data:
@@ -440,7 +586,7 @@ with tab4:
             else:
                 rows.append({"Product Key": key, "Amazon URL": str(val), "Best Buy URL": ""})
         df_map = pd.DataFrame(rows)
-        map_filter = st.text_input("\U0001f50d Search Cached Mappings", placeholder="e.g. iPhone 14")
+        map_filter = st.text_input("\U0001f50d Search Cached Mappings", placeholder="e.g. iPhone 15 Pro Max")
         if map_filter:
             mask = df_map.astype(str).apply(lambda x: x.str.contains(map_filter, case=False, na=False)).any(axis=1)
             df_map = df_map[mask]
@@ -455,12 +601,12 @@ with tab4:
                         mappings_data[k]["bestbuy_url"] = row["Best Buy URL"]
                 elif k:
                     mappings_data[k] = row["Amazon URL"]
-            MAPPINGS_JSON.write_text(json.dumps(mappings_data, indent=2), encoding="utf-8")
+            save_json_file(MAPPINGS_JSON, mappings_data)
             st.success("Saved updated URLs to verified_mappings.json!")
     else:
         st.info("No mappings found in `verified_mappings.json`.")
 
-with tab5:
+with tab6:
     st.subheader("\U0001f4dc Historical Price Change Audit (`price_update_log.jsonl`)")
     df_audit = load_audit_log()
     if not df_audit.empty:

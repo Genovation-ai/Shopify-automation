@@ -1,11 +1,11 @@
-import csv
+﻿import csv
+import re
 from pathlib import Path
 
 import catalog_check as checked
 
 folder = Path(__file__).resolve().parent
 
-# catalog_check records the CSV line number of each rejected row.
 rejected_lines = {
     line_number
     for line_number, variant_id, reason in checked.issues
@@ -17,10 +17,10 @@ for line_number, row in enumerate(checked.rows, start=2):
     if line_number in rejected_lines:
         continue
 
-    source = row["competitor_source"]
+    clean_model = re.split(r"\s*,\s*|\s+-\s+", row["product_title"])[0].strip()
 
     search_query = (
-        f"refurbished {row['product_title']} "
+        f"refurbished {clean_model} "
         f"{row['storage']} {row['color']} "
         f"{row['condition']} unlocked"
     )
@@ -52,10 +52,3 @@ amazon_rows = [
 print(f"\nSaved {len(prepared)} entries to {file_path.name}")
 print(f"Amazon Excellent searches: {len(amazon_rows)}")
 print(f"Best Buy searches: {len(prepared) - len(amazon_rows)}")
-
-print("\nFirst five Amazon search queries:")
-for row in amazon_rows[:5]:
-    print("-", row["search_query"])
-
-print("\nSearch preparation only. No competitor prices collected.")
-print("No Shopify prices changed.")

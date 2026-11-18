@@ -67,7 +67,7 @@ for line_number, row in enumerate(rows, start=2):
 
     try:
         price = Decimal(row["current_price"])
-        if not price.is_finite() or price <= 0:
+        if not price.is_finite() or price < 0:
             problems.append("price must be positive")
     except (InvalidOperation, KeyError):
         problems.append("invalid price")
