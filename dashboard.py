@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import pandas as pd
 import requests
 import streamlit as st
@@ -30,7 +30,6 @@ TASK_NAME = "Tech Genius Shopify Repricer"
 
 st.markdown("""
 <style>
-    /* Ensure the main container has enough top clearance so banners aren't clipped */
     .block-container { padding-top: 3.8rem !important; padding-bottom: 2rem; }
     div[data-testid="stMetric"] {
         background-color: #111827;
@@ -57,6 +56,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def get_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime if path.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+def parse_positive_float(val, fallback: float = 499.99) -> float:
+    try:
+        parsed = float(str(val).replace("$", "").replace(",", "").strip())
+        return parsed if parsed > 0 else fallback
+    except Exception:
+        return fallback
+
+
 def load_json_file(path: Path, default=None):
     if default is None:
         default = {}
@@ -72,11 +86,39 @@ def save_json_file(path: Path, data):
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def load_csv_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    p = Path(path_str)
+    if not p.exists() or mtime == 0.0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(p, dtype={"variant_id": str})
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_audit_log_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    p = Path(path_str)
+    if not p.exists() or mtime == 0.0:
+        return pd.DataFrame()
+    records = []
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+    return pd.DataFrame(records)
+
+
 def load_pricing_config():
     cfg = load_json_file(CONFIG_JSON, {"undercut_cad": 3.00, "step_down_pct": 5.0})
     return {
-        "undercut_cad": float(cfg.get("undercut_cad", 3.00)),
-        "step_down_pct": float(cfg.get("step_down_pct", 5.0)),
+        "undercut_cad": parse_positive_float(cfg.get("undercut_cad", 3.00), 3.00),
+        "step_down_pct": parse_positive_float(cfg.get("step_down_pct", 5.0), 5.0),
     }
 
 
@@ -89,21 +131,22 @@ def get_local_timezone_name() -> str:
     return f"{tz_name} ({offset})" if tz_name else offset
 
 
-def get_schedule_details() -> dict:
+@st.cache_data(ttl=30, show_spinner=False)
+def get_schedule_details_cached(os_name: str, task_name: str, tz_label: str) -> dict:
     info = {
         "state": "Unknown",
         "last_run": "N/A",
         "next_run": "8:00 AM / 8:00 PM",
         "last_result": "0 (Success)",
         "failures": 0,
-        "timezone": get_local_timezone_name(),
+        "timezone": tz_label,
     }
-    if os.name != "nt":
+    if os_name != "nt":
         return info
     try:
         ps_script = f"""
-        $t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction Stop
-        $i = Get-ScheduledTaskInfo -TaskName '{TASK_NAME}' -ErrorAction Stop
+        $t = Get-ScheduledTask -TaskName '{task_name}' -ErrorAction Stop
+        $i = Get-ScheduledTaskInfo -TaskName '{task_name}' -ErrorAction Stop
         $out = @{{
             State = [string]$t.State
             LastRun = if ($i.LastRunTime) {{ $i.LastRunTime.ToString('yyyy-MM-dd hh:mm tt') }} else {{ 'Never' }}
@@ -132,18 +175,25 @@ def get_schedule_details() -> dict:
     return info
 
 
-def toggle_scheduled_task(enable: bool):
+def toggle_scheduled_task(enable: bool) -> tuple[bool, str]:
     verb = "Enable-ScheduledTask" if enable else "Disable-ScheduledTask"
     ps_cmd = f"{verb} -TaskName '{TASK_NAME}'"
-    subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command \"{ps_cmd}\"'",
-        ],
-        timeout=30,
-    )
+    try:
+        res = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command \"{ps_cmd}\"'",
+            ],
+            timeout=30,
+        )
+        get_schedule_details_cached.clear()
+        if res.returncode == 0:
+            return True, f"Scheduled task updated ({'Enabled' if enable else 'Disabled'})."
+        return False, "Admin prompt was cancelled or returned a non-zero exit code."
+    except Exception as exc:
+        return False, f"Could not toggle scheduled task: {exc}"
 
 
 def get_latest_log():
@@ -180,21 +230,6 @@ def parse_log_summary(log_path: Path):
         "last_group_num": last_group_num,
         "raw_tail": "\n".join(lines[-50:]),
     }
-
-
-def load_audit_log():
-    if not AUDIT_JSONL.exists():
-        return pd.DataFrame()
-    records = []
-    with open(AUDIT_JSONL, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    records.append(json.loads(line))
-                except Exception:
-                    pass
-    return pd.DataFrame(records)
 
 
 def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFrame, df_searches: pd.DataFrame, include_ids: bool = False) -> pd.DataFrame:
@@ -271,13 +306,17 @@ def build_structured_updates_table(df_audit: pd.DataFrame, df_report: pd.DataFra
 
 def push_manual_shopify_price(variant_id: str, new_price_cad: float, reason_label: str = "Manual Review Approval") -> tuple[bool, str]:
     try:
+        price_dec = Decimal(str(new_price_cad))
+        if price_dec <= 0:
+            return False, "Price must be greater than $0.00 CAD."
+        price_str = f"{price_dec:.2f}"
+
         import shopify_check as shopify
         from batch_proposals import read_variant
 
         variant = read_variant(variant_id)
         product_id = variant["product"]["id"]
         old_price = variant["price"]
-        price_str = f"{Decimal(str(new_price_cad)):.2f}"
 
         mutation = """
         mutation UpdateVariantPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
@@ -305,7 +344,7 @@ def push_manual_shopify_price(variant_id: str, new_price_cad: float, reason_labe
             return False, str(errors)
 
         if REPORT_CSV.exists():
-            df_rep = pd.read_csv(REPORT_CSV)
+            df_rep = pd.read_csv(REPORT_CSV, dtype={"variant_id": str})
             mask = df_rep["variant_id"] == variant_id
             if mask.any():
                 df_rep.loc[mask, "proposed_price_cad"] = price_str
@@ -327,7 +366,11 @@ def push_manual_shopify_price(variant_id: str, new_price_cad: float, reason_labe
         with open(AUDIT_JSONL, "a", encoding="utf-8") as af:
             af.write(json.dumps(audit_entry) + "\n")
 
+        load_csv_cached.clear()
+        load_audit_log_cached.clear()
         return True, f"Updated {variant_id} (${old_price} → ${price_str} CAD)"
+    except (InvalidOperation, ValueError):
+        return False, "Invalid price value entered."
     except Exception as e:
         return False, str(e)
 
@@ -378,20 +421,20 @@ with open(log_path, "w", encoding="utf-8") as lf:
     return log_file.name
 
 
-# Load core datasets
-df_report_full = pd.read_csv(REPORT_CSV) if REPORT_CSV.exists() else pd.DataFrame()
-df_searches = pd.read_csv(SEARCHES_CSV) if SEARCHES_CSV.exists() else pd.DataFrame()
-df_audit = load_audit_log()
-available_models = sorted(df_report_full["model"].dropna().unique().tolist()) if not df_report_full.empty else []
+# Load core datasets using mtime-aware caching
+df_report_full = load_csv_cached(str(REPORT_CSV), get_mtime(REPORT_CSV))
+df_searches = load_csv_cached(str(SEARCHES_CSV), get_mtime(SEARCHES_CSV))
+df_audit = load_audit_log_cached(str(AUDIT_JSONL), get_mtime(AUDIT_JSONL))
+available_models = sorted(df_report_full["model"].dropna().unique().tolist()) if (not df_report_full.empty and "model" in df_report_full.columns) else []
 pricing_cfg = load_pricing_config()
 pinned_variants = load_json_file(PINS_JSON, {})
 mappings_data = load_json_file(MAPPINGS_JSON, {})
 latest_log = get_latest_log()
 log_info = parse_log_summary(latest_log)
-sched_info = get_schedule_details()
+sched_info = get_schedule_details_cached(os.name, TASK_NAME, get_local_timezone_name())
 
 # Reconcile mutually exclusive variant categories from catalogue_report.csv
-if not df_report_full.empty:
+if not df_report_full.empty and "status" in df_report_full.columns:
     status_counts = df_report_full["status"].value_counts().to_dict()
     total_variants = len(df_report_full)
     applied_cnt = status_counts.get("APPLIED_AND_VERIFIED", 0)
@@ -429,14 +472,19 @@ with st.sidebar:
     with col_s1:
         if sched_info["state"] == "Disabled":
             if st.button("▶️ Resume", width="stretch"):
-                toggle_scheduled_task(True)
+                ok_t, msg_t = toggle_scheduled_task(True)
+                st.toast(msg_t, icon="✅" if ok_t else "⚠️")
                 st.rerun()
         else:
             if st.button("⏸️ Pause", width="stretch"):
-                toggle_scheduled_task(False)
+                ok_t, msg_t = toggle_scheduled_task(False)
+                st.toast(msg_t, icon="✅" if ok_t else "⚠️")
                 st.rerun()
     with col_s2:
         if st.button("🔄 Refresh", width="stretch"):
+            load_csv_cached.clear()
+            load_audit_log_cached.clear()
+            get_schedule_details_cached.clear()
             st.rerun()
 
     st.divider()
@@ -456,7 +504,7 @@ with st.sidebar:
     else:
         st.caption("✨ Simplified view focused on products, proposed price changes, and items needing attention.")
 
-# Header & Reconciled Subtitle (Placed below top margin spacing)
+# Header & Reconciled Subtitle
 if is_admin:
     st.markdown('<div class="admin-badge">🛠️ Admin / Technical View — Showing GraphQL Variant IDs, URL Cache Editor, Sync Flags & Raw Execution Logs</div>', unsafe_allow_html=True)
 
@@ -564,7 +612,7 @@ with tab_overview:
     else:
         st.info("No price updates recorded yet. Click 'Check Competitor Prices' above to begin.")
 
-    if not df_report_full.empty:
+    if not df_report_full.empty and "model" in df_report_full.columns and "status" in df_report_full.columns:
         st.subheader("Catalog Health by iPhone Model")
         df_chart = df_report_full.copy()
         def categorize_status(s):
@@ -709,7 +757,7 @@ with tab_review:
                 for i, (_, r) in enumerate(selected_to_apply.iterrows(), 1):
                     ok, _ = push_manual_shopify_price(
                         str(r["variant_id"]),
-                        float(r["New Price ($)"]),
+                        parse_positive_float(r["New Price ($)"], 0.0),
                         reason_label="Reviewed & Approved via UI",
                     )
                     if ok:
@@ -733,7 +781,7 @@ with tab_review:
     with col_act2:
         st.subheader("Manual Price Override & Pin")
         st.caption("Set a custom price for any variant or pin it so scheduled runs skip it.")
-        if not df_report_full.empty:
+        if not df_report_full.empty and available_models:
             ov_model = st.selectbox("Product Model", options=available_models, key="ov_model")
             df_m_sub = df_report_full[df_report_full["model"] == ov_model]
             ov_options = [
@@ -742,8 +790,9 @@ with tab_review:
             ]
             ov_choice = st.selectbox("Variant", options=ov_options, key="ov_variant")
             chosen_vid = ov_choice.split(" — ")[-1].strip() if ov_choice else ""
-            cur_row = df_m_sub[df_m_sub["variant_id"] == chosen_vid].iloc[0] if chosen_vid else None
-            default_p = float(cur_row["proposed_price_cad"]) if (cur_row is not None and str(cur_row["proposed_price_cad"]).replace(".", "", 1).isdigit()) else 499.99
+            cur_rows = df_m_sub[df_m_sub["variant_id"] == chosen_vid]
+            cur_row = cur_rows.iloc[0] if not cur_rows.empty else None
+            default_p = parse_positive_float(cur_row["proposed_price_cad"], 499.99) if cur_row is not None else 499.99
 
             custom_price = st.number_input("Custom Shopify Price ($ CAD)", min_value=1.0, max_value=5000.0, value=default_p, step=1.0)
             pin_variant = st.checkbox("Pin price (lock against automated changes)", value=(chosen_vid in pinned_variants))
@@ -851,16 +900,21 @@ if is_admin:
                 df_map = df_map[mask]
             edited_df = st.data_editor(df_map, width="stretch", height=380, num_rows="dynamic")
             if st.button("💾 Save URL Cache", type="primary"):
+                updated_mappings = dict(mappings_data)
                 for _, row in edited_df.iterrows():
-                    k = row["Product Key"]
-                    if k in mappings_data and isinstance(mappings_data[k], dict):
-                        if "amazon_url" in mappings_data[k]:
-                            mappings_data[k]["amazon_url"] = row["Amazon URL"]
-                        if "bestbuy_url" in mappings_data[k]:
-                            mappings_data[k]["bestbuy_url"] = row["Best Buy URL"]
-                    elif k:
-                        mappings_data[k] = row["Amazon URL"]
-                save_json_file(MAPPINGS_JSON, mappings_data)
+                    k = str(row.get("Product Key") or "").strip()
+                    if not k:
+                        continue
+                    amz_url = str(row.get("Amazon URL") or "").strip()
+                    bb_url = str(row.get("Best Buy URL") or "").strip()
+                    if k in updated_mappings and isinstance(updated_mappings[k], dict):
+                        updated_mappings[k]["amazon_url"] = amz_url
+                        updated_mappings[k]["bestbuy_url"] = bb_url
+                    elif bb_url:
+                        updated_mappings[k] = {"amazon_url": amz_url, "bestbuy_url": bb_url}
+                    else:
+                        updated_mappings[k] = amz_url
+                save_json_file(MAPPINGS_JSON, updated_mappings)
                 st.success("Saved updated URLs to verified_mappings.json!")
         st.divider()
         st.subheader("🖥️ Full Execution Log Tail (`logs/run_*.log`)")
